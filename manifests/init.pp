@@ -58,6 +58,10 @@
 #   EHCache configuration for clustered mode
 # @param ehcache_object_port
 #   EHCache configuration for clustered mode
+# @param use_jndi_ds
+#   If true, the database will be configured as JNDI datasource in server.xml and then referenced in dbconfig.xml
+# @param jndi_ds_name
+#   Configures the JNDI datasource name
 # @param db
 #   The kind of database to use.
 # @param dbname
@@ -263,6 +267,15 @@
 #   undocumented SSO parameter
 # @param session_lastvalidation
 #   undocumented SSO parameter
+# @param plugins
+#   a hash of hashes defining custom plugins to install
+#   a single plugin configuration will has the following form
+#   installation_name_of_plugin.jar: this name wil be used to install the plugin within jira
+#     source: url of plugin to be fetched
+#     username: the username for authentification, if necessary
+#     password: the password for authentification, if necessary
+#     checksum: the checksum of the plugin, to determine the need for an upgrade
+#     checksumtype: the type of checksum used (none|md5|sha1|sha2|sha256|sha384|sha512). (default: none)
 # @param jvm_permgen
 #   Deprecated. Exists to notify users that they're trying to configure a parameter that has no effect
 # @param poolsize
@@ -296,12 +309,14 @@ class jira (
   Optional[Stdlib::Port] $ehcache_listener_port                     = undef,
   Optional[Stdlib::Port] $ehcache_object_port                       = undef,
   # Database Settings
-  Enum['postgresql','mysql','sqlserver','oracle','h2'] $db          = 'postgresql',
+  Boolean $use_jndi_ds                                              = false,
+  String[1] $jndi_ds_name                                           = 'JiraDS',
+  Enum['postgresql', 'mysql', 'sqlserver', 'oracle', 'h2'] $db      = 'postgresql',
   String $dbuser                                                    = 'jiraadm',
   String $dbpassword                                                = 'mypassword',
   String $dbserver                                                  = 'localhost',
   String $dbname                                                    = 'jira',
-  Optional[Variant[Integer,String]] $dbport                         = undef,
+  Optional[Variant[Integer, String]] $dbport                        = undef,
   Optional[String] $dbdriver                                        = undef,
   Optional[String] $dbtype                                          = undef,
   Optional[String] $dburl                                           = undef,
@@ -344,7 +359,7 @@ class jira (
   Optional[String] $checksum                                        = undef,
   Boolean $disable_notifications                                    = false,
   Optional[String] $proxy_server                                    = undef,
-  Optional[Enum['none','http','https','ftp']] $proxy_type           = undef,
+  Optional[Enum['none', 'http', 'https', 'ftp']] $proxy_type        = undef,
   # Manage service
   Boolean $service_manage                                           = true,
   Stdlib::Ensure::Service $service_ensure                           = 'running',
@@ -352,10 +367,9 @@ class jira (
   $service_notify                                                   = undef,
   $service_subscribe                                                = undef,
   # Command to stop jira in preparation to upgrade. This is configurable
-  # incase the jira service is managed outside of puppet. eg: using the
+  # in case the jira service is managed outside of puppet. eg: using the
   # puppetlabs-corosync module: 'crm resource stop jira && sleep 15'
-  # Note: the command should return either 0 or  5 
-  # when the service doesn't exist
+  # Note: the command should return either 0 or 5 when the service doesn't exist
   String $stop_jira                                                 = 'systemctl stop jira.service && sleep 15',
   # Whether to manage the 'check-java.sh' script, and where to retrieve
   # the script from.
@@ -380,7 +394,9 @@ class jira (
   Stdlib::Absolutepath $tomcat_keystore_file                        = '/home/jira/jira.jks',
   String $tomcat_keystore_pass                                      = 'changeit',
   Enum['JKS', 'JCEKS', 'PKCS12'] $tomcat_keystore_type              = 'JKS',
-  String $tomcat_accesslog_format                                   = '%a %{jira.request.id}r %{jira.request.username}r %t &quot;%m %U%q %H&quot; %s %b %D &quot;%{Referer}i&quot; &quot;%{User-Agent}i&quot; &quot;%{jira.request.assession.id}r&quot;',
+  String $tomcat_accesslog_format                                   =
+  '%a %{jira.request.id}r %{jira.request.username}r %t &quot;%m %U%q %H&quot; %s %b %D &quot;%{Referer}i&quot; &quot;%{User-Agent}i&quot; &quot;%{jira.request.assession.id}r&quot;'
+  ,
   Boolean $tomcat_accesslog_enable_xforwarded_for                   = false,
   # Tomcat Tunables
   Integer $tomcat_max_threads                                       = 150,
@@ -407,6 +423,8 @@ class jira (
   String $session_tokenkey                                          = 'session.tokenkey',
   Integer $session_validationinterval                               = 5,
   String $session_lastvalidation                                    = 'session.lastvalidation',
+  # plugin installation
+  Hash $plugins                                                     = {},
   # Deprecated parameters
   Optional[String] $jvm_permgen                                     = undef,
   Optional[Integer[0]] $poolsize                                    = undef,
@@ -425,7 +443,8 @@ class jira (
   }
 
   if $enable_connection_pooling != undef {
-    deprecation('jira::enable_connection_pooling', 'jira::enable_connection_pooling has been removed and does nothing. Please simply configure the connection pooling parameters')
+    deprecation('jira::enable_connection_pooling',
+      'jira::enable_connection_pooling has been removed and does nothing. Please simply configure the connection pooling parameters')
   }
 
   if $tomcat_redirect_https_port {
@@ -444,13 +463,13 @@ class jira (
 
   $webappdir = "${installdir}/atlassian-${product_name}-${version}-standalone"
 
-  if ! empty($ajp) {
-    if ! ('port' in $ajp) {
+  if !empty($ajp) {
+    if !('port' in $ajp) {
       fail('You need to specify a valid port for the AJP connector.')
     } else {
       assert_type(Variant[Pattern[/^\d+$/], Stdlib::Port], $ajp['port'])
     }
-    if ! ('protocol' in $ajp) {
+    if !('protocol' in $ajp) {
       fail('You need to specify a valid protocol for the AJP connector.')
     } else {
       assert_type(Enum['AJP/1.3', 'org.apache.coyote.ajp', 'org.apache.coyote.ajp.AjpNioProtocol'], $ajp['protocol'])
@@ -471,5 +490,24 @@ class jira (
 
   if ($enable_sso) {
     class { 'jira::sso': }
+  }
+
+  # install any given library or remove them
+  $plugins.each |String $plugin_file_name, Hash $plugin_data| {
+    $target = "${jira::webappdir}/atlassian-jira/WEB-INF/lib/${plugin_file_name}"
+    if  $plugin_data['ensure'] == 'absent' {
+      $ensure = 'absent'
+    } else {
+      $ensure = 'present'
+    }
+    archive {
+      $target:
+        ensure        => $ensure,
+        source        => $plugin_data['source'],
+        username      => $plugin_data['username'],
+        password      => $plugin_data['password'],
+        checksum      => $plugin_data['checksum'],
+        checksum_type => $plugin_data['checksum_type'],
+    }
   }
 }
